@@ -7,7 +7,6 @@
             [logseq.db-sync.common :as common]
             [logseq.db-sync.index :as index]
             [logseq.db-sync.protocol :as protocol]
-            [logseq.db-sync.repair :as repair]
             [logseq.db-sync.snapshot :as snapshot]
             [logseq.db-sync.storage :as storage]
             [logseq.db-sync.tx-sanitize :as tx-sanitize]
@@ -117,12 +116,26 @@
   (common/sql-exec sql "delete from sync_meta")
   (storage/set-t! sql 0))
 
+(defn- graph-id-from-sync-path
+  [^js url]
+  (let [path (.-pathname url)
+        prefix "/sync/"]
+    (when (string/starts-with? path prefix)
+      (let [rest-path (subs path (count prefix))
+            slash-idx (or (string/index-of rest-path "/") -1)
+            graph-id (if (neg? slash-idx)
+                       rest-path
+                       (subs rest-path 0 slash-idx))]
+        (when (seq graph-id)
+          graph-id)))))
+
 (defn graph-id-from-request [request]
   (let [header-id (.get (.-headers request) "x-graph-id")
         url (js/URL. (.-url request))
-        param-id (.get (.-searchParams url) "graph-id")]
-    (when (seq (or header-id param-id))
-      (or header-id param-id))))
+        param-id (.get (.-searchParams url) "graph-id")
+        graph-id (or header-id param-id (graph-id-from-sync-path url))]
+    (when (seq graph-id)
+      graph-id)))
 
 ;; (defn- snapshot-key [graph-id snapshot-id]
 ;;   (str graph-id "/" snapshot-id ".snapshot"))
@@ -293,21 +306,6 @@
              :txs txs}
       (string? checksum) (assoc :checksum checksum))))
 
-(defn- parse-uuid-param
-  [value]
-  (try
-    (when (seq value)
-      (uuid value))
-    (catch :default _
-      nil)))
-
-(defn repair-blocks-response
-  [^js self block-uuids]
-  (ensure-conn! self)
-  (let [db @(.-conn self)
-        tx-data (repair/tx-data db block-uuids)]
-    {:tx (protocol/tx->transit tx-data)}))
-
 (defn- block-uuid-lookup-ref
   [entity-id]
   (when (and (sequential? entity-id)
@@ -472,26 +470,6 @@
         (if-not ready-for-sync?
           (http/error-response "graph not ready" 409)
           (http/json-response :sync/pull (pull-response self since)))))))
-
-(defn- handle-sync-repair-blocks
-  [^js self request ^js url]
-  (let [graph-id (graph-id-from-request request)
-        block-uuids (->> (.getAll (.-searchParams url) "uuid")
-                         (map parse-uuid-param)
-                         (remove nil?)
-                         distinct
-                         vec)]
-    (p/let [ready-for-sync? (<ready-for-sync? self graph-id)]
-      (cond
-        (not ready-for-sync?)
-        (http/error-response "graph not ready" 409)
-
-        (empty? block-uuids)
-        (http/bad-request "missing block uuid")
-
-        :else
-        (http/json-response :sync/repair-blocks
-                            (repair-blocks-response self block-uuids))))))
 
 (defn- normalize-diagnostic-block
   [{:keys [block/uuid block/parent block/page block/order] :as block}]
@@ -681,9 +659,6 @@
 
     :sync/pull
     (handle-sync-pull self url)
-
-    :sync/repair-blocks
-    (handle-sync-repair-blocks self request url)
 
     :sync/checksum-diagnostics
     (handle-sync-checksum-diagnostics self request)
