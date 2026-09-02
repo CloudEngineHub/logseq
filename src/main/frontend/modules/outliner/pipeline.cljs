@@ -1,7 +1,6 @@
 (ns frontend.modules.outliner.pipeline
   (:require [clojure.string :as string]
             [frontend.db.subs :as db-subs]
-            [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
             [frontend.state :as state]
             [frontend.util :as util]
@@ -62,7 +61,7 @@
           (state/remove-pages-from-recent! removed-page-ids)))
       (when (and (current-page-deleted? current-page deleted)
                  (not (util/mobile?)))
-        (route-handler/redirect-to-home!))
+        (.back js/window.history))
 
       (cond
         initial-pages?
@@ -73,7 +72,7 @@
         :else
         (do
           (when (current-page-recycled? current-page blocks)
-            (route-handler/redirect! {:to :home :push false}))
+            (.back js/window.history))
 
           (when (or (not= (:client-id tx-meta) (:client-id (state/get-state)))
                     (= :apply-template (:outliner-op tx-meta)))
