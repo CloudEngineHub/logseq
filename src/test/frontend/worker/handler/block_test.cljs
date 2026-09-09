@@ -106,6 +106,7 @@
           (keyword? (:db/ident reference))))
   (is (every? #{:db/id :block/uuid :db/ident :block/title :block/name
                 :block/tags :logseq.property/value :logseq.property/icon
+                :logseq.property/type :db/cardinality
                 :logseq.property.class/hide-from-node
                 :logseq.property/choice-exclusions
                 :logseq.property.asset/type
@@ -166,6 +167,34 @@
             (is (predicate value)
                 "Reference-valued properties retain their renderer type identity")))))))
 
+(deftest canonical-property-values-retain-source-property-type-test
+  (let [{:keys [conn target-uuid page-uuid]} (canonical-block-fixture)
+        property-uuid (random-uuid)]
+    (d/transact! conn [{:db/id -1
+                       :block/uuid property-uuid
+                       :block/title "URL"
+                       :db/ident :user.property/URL
+                       :db/valueType :db.type/ref
+                       :db/cardinality :db.cardinality/many
+                       :block/tags :logseq.class/Property
+                       :logseq.property/type :url}
+                      {:block/uuid target-uuid
+                       :logseq.property/created-from-property -1}])
+    (doseq [property-type [:url :default]]
+      (d/transact! conn [{:block/uuid property-uuid
+                         :logseq.property/type property-type}])
+      (let [block (block-handler/canonical-block
+                   @conn (d/entity @conn [:block/uuid target-uuid]))]
+        (is (= property-type
+               (get-in block [:logseq.property/created-from-property
+                              :logseq.property/type])))
+        (is (= :db.cardinality/many
+               (get-in block [:logseq.property/created-from-property :db/cardinality])))
+        (is (= (= :url property-type) (entity/url-property-value? block)))))
+    (is (not (entity/url-property-value?
+              (block-handler/canonical-block
+               @conn (d/entity @conn [:block/uuid page-uuid])))))))
+
 (deftest canonical-block-keeps-own-attributes-and-only-shallow-references-test
   (when-let [canonical-block (canonical-block-api)]
     (let [{:keys [conn target-uuid]} (canonical-block-fixture)
@@ -206,7 +235,7 @@
       (is (= 1 (:block.temp/order-list-index block))
           "Canonical blocks retain worker-derived ordered-list indexes.")
       (is (map? (:block.temp/positioned-properties block)))
-      (is (vector? (:block.temp/breadcrumb block)))
+      (is (not (contains? block :block.temp/breadcrumb)))
       (is (integer? (:block.temp/refs-count block)))
       (is (some #{:user.property/priority} (:block.temp/property-keys block))
           "Own property idents are persisted for collapse.")
@@ -215,7 +244,6 @@
       (is (not-any? #(and (keyword? %)
                           (= "block.temp" (namespace %)))
                     (remove #{:block.temp/order-list-index
-                              :block.temp/breadcrumb
                               :block.temp/positioned-properties
                               :block.temp/property-keys
                               :block.temp/refs-count}
