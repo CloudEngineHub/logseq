@@ -851,9 +851,17 @@
     (if-let [blocks (seq (get-selected-blocks))]
       (cycle-todos!)
       (when-let [edit-block (state/get-edit-block)]
-        (ui-outliner-tx/transact!
-         {:outliner-op :cycle-todos}
-         (db-based-cycle-todo! edit-block))))))
+        ;; `edit-block` is a snapshot taken when edit mode started, so its
+        ;; :logseq.property/status can be stale after an earlier toggle in
+        ;; the same edit session (see db-test#1177). Re-fetch the block so
+        ;; the status cycles from its current value instead of repeating
+        ;; the same transition every time.
+        (p/let [block (db-async/<get-block (state/get-current-repo) (:block/uuid edit-block)
+                                           {:children? false})]
+          (when block
+            (ui-outliner-tx/transact!
+             {:outliner-op :cycle-todos}
+             (db-based-cycle-todo! block))))))))
 
 (defn delete-block-aux!
   ([block]
@@ -3875,7 +3883,8 @@
                           (filter db-property/property? (keys block)))
         properties (->> property-keys
                         (remove db-property/db-attribute-properties)
-                        (remove #{:logseq.property/created-by-ref})
+                        (remove #{:logseq.property/created-by-ref
+                                  :logseq.property/created-from-property})
                         (remove nil?))]
     (or (seq properties)
         (:logseq.property/query block))))
@@ -4033,7 +4042,40 @@
      (db-async/<get-block repo block-id {:include-collapsed-children? true})
      (when-not (or skip-db-collpsing? (skip-collapsing-in-db?))
        (set-blocks-collapsed! [block-id] false))
-     (state/set-collapsed-block! block-id false (or container-id (current-editor-container-id))))))
+     (cond
+       ;; Display-only expand (zoom/root load) must stay on the given container.
+       ;; Falling back to the current editor container writes `:ui/collapsed-blocks`
+       ;; onto the parent page, so the subtree stays open after navigate-back.
+       skip-db-collpsing?
+       (when container-id
+         (state/set-collapsed-block! block-id false container-id))
+
+       :else
+       (state/set-collapsed-block! block-id false (or container-id (current-editor-container-id)))))))
+
+(defn- blocks-at-shallowest-collapsed-level
+  [blocks]
+  (:blocks
+   (reduce
+    (fn [{:keys [level] :as result} block]
+      (let [block-level (:block/level block)]
+        (cond
+          (not (and (pos-int? block-level)
+                    (util/collapsed? block)))
+          result
+
+          (or (nil? level) (< block-level level))
+          {:level block-level
+           :blocks [block]}
+
+          (= block-level level)
+          (update result :blocks conj block)
+
+          :else
+          result)))
+    {:level nil
+     :blocks []}
+    blocks)))
 
 (defn expand!
   ([e] (expand! e false))
@@ -4058,18 +4100,10 @@
 
      :else
      ;; expand one level
-     (p/let [blocks-with-level (<all-blocks-with-level {})
-             max-level (or (apply max (map :block/level blocks-with-level)) 99)]
-       (loop [level 1]
-         (if (> level max-level)
-           nil
-           (let [blocks-to-expand (->> blocks-with-level
-                                       (filter (fn [b] (= (:block/level b) level)))
-                                       (filter util/collapsed?))]
-             (if (empty? blocks-to-expand)
-               (recur (inc level))
-               (doseq [{:block/keys [uuid]} blocks-to-expand]
-                 (expand-block! uuid))))))))))
+     (p/let [blocks-with-level (<all-blocks-with-level {})]
+       (doseq [{:block/keys [uuid]}
+               (blocks-at-shallowest-collapsed-level blocks-with-level)]
+         (expand-block! uuid))))))
 
 (defn collapse!
   ([e] (collapse! e false))

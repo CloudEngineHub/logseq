@@ -123,7 +123,7 @@ Graph commands:
 - `graph info [--graph <name>]` - show graph metadata (defaults to current graph)
 - `graph export --type edn|sqlite --file <path> [--graph <name>]` - export a graph to EDN or SQLite
   - EDN export also accepts `--edn-options/-e <edn-map>` and `--pretty-print/-p`
-  - `--edn-options` is an EDN map; `:export-type` (if present) overrides the default `:graph`, and every other key is forwarded to the worker as `:graph-options` (for example, `'{:export-type :graph-human :include-timestamps? true :exclude-built-in-pages? true :exclude-namespaces #{:user :project}}'`)
+  - `--edn-options` is an EDN map passed directly to the worker, with `:export-type` defaulting to `:graph`. Parameters for `:block`, `:page`, `:view-nodes`, and `:selected-nodes` stay at the top level (for example, `'{:export-type :selected-nodes :node-ids [42]}'`). `:graph-human` options belong under `:graph-options` (for example, `'{:export-type :graph-human :graph-options {:include-timestamps? true}}'`).
   - `--pretty-print` writes the EDN file through `clojure.pprint` for readability while remaining round-trippable via `graph import --type edn`
   - SQLite export writes the snapshot directly to the destination path through `db-worker-node` instead of round-tripping a base64 payload through the CLI
   - `--edn-options` and `--pretty-print` are rejected when `--type sqlite` is selected; a non-map value for `--edn-options` is also rejected
@@ -392,6 +392,10 @@ JSON key migration (flat -> namespaced):
 | `data.items[].cardinality` | `data.items[].db/cardinality` |
 | `data.root.children[]` | `data.root.block/children[]` |
 - `upsert page`, `upsert block`, `upsert task`, and `upsert asset` return entity ids in `data.result` for JSON/EDN output, and include ids in human output.
+  - In create mode, block/task/asset results contain only the requested entities. Insertion targets, references (including automatically created pages), tags, properties, and property values are excluded.
+  - Block trees return every requested descendant in input-tree preorder: root, its children and their descendants in sibling order, then the next root. UUIDs are deduplicated by first occurrence. For `[Root(Child(Grandchild)), Sibling]`, the result is `[Root-id Child-id Grandchild-id Sibling-id]`.
+  - The same contract applies to `--blocks` and `--blocks-file`. A requested UUID that cannot be resolved fails the command with `add-id-resolution-failed`; creation does not return a partial success list. Writes may already have completed when resolution fails.
+  - Command-level `--update-tags` and `--update-properties` in block create mode apply to the requested top-level blocks. Returning descendants does not make these updates recursive.
   - Human example:
     ```text
     Upserted page:

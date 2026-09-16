@@ -596,29 +596,49 @@
           (is false (str error)))))))
 
 (deftest cycle-todo-uses-current-edit-block-test
-  (let [edit-block {:db/id 1
-                    :block/uuid #uuid "11111111-1111-1111-1111-111111111111"
-                    :logseq.property/status {:db/ident :logseq.property/status.todo}}
-        tx-calls (atom [])
-        cycle-calls (atom [])]
-    (with-redefs [state/get-editor-action (constantly nil)
-                  editor/get-selected-blocks (constantly nil)
-                  state/get-edit-block (constantly edit-block)
-                  state/get-edit-input-id (constantly "edit-block-test")
-                  gdom/getElement (constantly #js {})
-                  state/get-edit-pos (constantly 0)
-                  conn/get-db (constantly :test-db)
-                  db-transact/apply-outliner-ops (fn [db ops opts]
-                                                   (reset! tx-calls [db ops opts])
-                                                   :tx)
-                  editor/db-based-cycle-todo! (fn [block]
-                                                (swap! cycle-calls conj block))]
-      (editor/cycle-todo!)
-      (is (= [edit-block] @cycle-calls))
-      (is (= [nil
-              []
-              {:outliner-op :cycle-todos}]
-             @tx-calls)))))
+  ;; cycle-todo! re-fetches the block before cycling (see db-test#1177), so
+  ;; this now exercises the same async pattern as the move-selected-blocks
+  ;; tests above instead of asserting synchronously right after the call.
+  (async done
+    (let [edit-block {:db/id 1
+                      :block/uuid #uuid "11111111-1111-1111-1111-111111111111"
+                      :logseq.property/status {:db/ident :logseq.property/status.todo}}
+          tx-calls (atom [])
+          cycle-calls (atom [])
+          get-block-calls (atom [])]
+      (-> (p/with-redefs [state/get-editor-action (constantly nil)
+                          editor/get-selected-blocks (constantly nil)
+                          state/get-edit-block (constantly edit-block)
+                          state/get-edit-input-id (constantly "edit-block-test")
+                          state/get-current-repo (constantly "test")
+                          gdom/getElement (constantly #js {})
+                          state/get-edit-pos (constantly 0)
+                          conn/get-db (constantly :test-db)
+                          db-async/<get-block (fn [repo id-or-uuid opts]
+                                                (swap! get-block-calls conj [repo id-or-uuid opts])
+                                                (p/resolved edit-block))
+                          db-transact/apply-outliner-ops (fn [db ops opts]
+                                                            (reset! tx-calls [db ops opts])
+                                                            :tx)
+                          editor/db-based-cycle-todo! (fn [block]
+                                                        (swap! cycle-calls conj block))]
+            (-> (try
+                  (editor/cycle-todo!)
+                  (catch :default error
+                    (p/rejected error)))
+                (p/then
+                 (fn []
+                   (is (= [["test" (:block/uuid edit-block) {:children? false}]]
+                          @get-block-calls))
+                   (is (= [edit-block] @cycle-calls))
+                   (is (= [nil
+                           []
+                           {:outliner-op :cycle-todos}]
+                          @tx-calls))))
+                (p/catch
+                 (fn [error]
+                   (is false (str error))))))
+          (p/finally done)))))
 
 (deftest delete-block-aux-uses-passed-block-test
   (let [block-id #uuid "11111111-1111-1111-1111-111111111111"
@@ -2192,6 +2212,58 @@
       (is (empty? @collapsed)
           "Comment editor collapse shortcut should not collapse synthetic draft blocks"))))
 
+(defn- <expand-unselected-block-ids
+  [blocks]
+  (let [expanded (atom [])]
+    (-> (p/with-redefs [util/stop (constantly nil)
+                        state/editing? (constantly false)
+                        state/selection? (constantly false)
+                        editor/<all-blocks-with-level (fn [_]
+                                                        (p/resolved blocks))
+                        editor/expand-block! (fn [block-id & _]
+                                               (swap! expanded conj block-id))]
+          (editor/expand! nil))
+        (p/then (fn [_] @expanded)))))
+
+(deftest expand-without-selection-expands-shallowest-collapsed-level
+  (async done
+         (let [root-id #uuid "11111111-1111-1111-1111-111111111111"
+               parent-id #uuid "22222222-2222-2222-2222-222222222222"
+               deep-a-id #uuid "33333333-3333-3333-3333-333333333333"
+               shallow-a-id #uuid "44444444-4444-4444-4444-444444444444"
+               deep-b-id #uuid "55555555-5555-5555-5555-555555555555"
+               shallow-b-id #uuid "66666666-6666-6666-6666-666666666666"
+               ignored-root {:block/uuid root-id
+                             :block/collapsed? true}
+               uncollapsed-parent {:block/uuid parent-id
+                                   :block/level 1}
+               deep-a {:block/uuid deep-a-id
+                       :block/level 2
+                       :block/collapsed? true}
+               shallow-a {:block/uuid shallow-a-id
+                          :block/level 1
+                          :block/collapsed? true}
+               deep-b {:block/uuid deep-b-id
+                       :block/level 2
+                       :block/collapsed? true}
+               shallow-b {:block/uuid shallow-b-id
+                          :block/level 1
+                          :block/collapsed? true}]
+           (-> (p/let [mixed-expanded (<expand-unselected-block-ids
+                                       [ignored-root uncollapsed-parent
+                                        deep-a shallow-a deep-b shallow-b])
+                       remaining-deep-expanded (<expand-unselected-block-ids
+                                                [ignored-root uncollapsed-parent
+                                                 deep-a deep-b])]
+                 (is (= [shallow-a-id shallow-b-id] mixed-expanded)
+                     "Mixed levels expand only the shallowest collapsed blocks in input order")
+                 (is (= [deep-a-id deep-b-id] remaining-deep-expanded)
+                     "When no shallower collapsed level remains, expand the remaining deep level in input order"))
+               (p/catch
+                (fn [error]
+                  (is false (str error))))
+               (p/finally done)))))
+
 (deftest db-based-save-assets-honors-explicit-target-block
   (async done
     (let [draft-uuid #uuid "8789a99e-5147-41a1-a836-4e0a6f03fe9e"
@@ -2735,4 +2807,12 @@
                :block.temp/property-keys [:block/tags]})))
     (is (not (editor/db-collapsable?
               {:block/title "plain"
-               :block/tags [{:db/ident :logseq.class/Page}]})))))
+               :block/tags [{:db/ident :logseq.class/Page}]}))))
+
+  (testing "created-from-property metadata does not make a node collapsable"
+    (is (not (editor/db-collapsable?
+              {:block/title "hello"
+               :block.temp/property-keys [:logseq.property/created-from-property]})))
+    (is (not (editor/db-collapsable?
+              {:block/title "hello"
+               :logseq.property/created-from-property {:db/ident :user.property/p1}})))))
