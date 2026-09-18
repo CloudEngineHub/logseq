@@ -878,6 +878,81 @@
         (is (some? (:logseq.property/status doing-block)))
         (is (uuid? status-uuid))))))
 
+(deftest structured-copy-tree-keeps-property-children-and-skips-hidden-nodes-test
+  (let [conn (db-test/create-conn)
+        page-uuid (random-uuid)
+        property-uuid (random-uuid)
+        root-uuid (random-uuid)
+        visible-uuid (random-uuid)
+        property-value-uuid (random-uuid)
+        recycled-uuid (random-uuid)
+        closed-uuid (random-uuid)]
+    (d/transact! conn
+                 [{:db/id -1
+                   :block/uuid page-uuid
+                   :block/tx-id 1
+                   :block/title "Page"
+                   :block/name "page"
+                   :block/tags :logseq.class/Page}
+                  {:db/id -2
+                   :db/ident :user.property/Text
+                   :db/valueType :db.type/ref
+                   :db/cardinality :db.cardinality/one
+                   :block/uuid property-uuid
+                   :block/tx-id 1
+                   :block/title "Text"
+                   :block/tags :logseq.class/Property}
+                  {:db/id -3
+                   :block/uuid root-uuid
+                   :block/tx-id 1
+                   :block/title "Root"
+                   :block/page -1
+                   :block/parent -1
+                   :block/order "a0"
+                   :block/collapsed? true}
+                  {:db/id -4
+                   :block/uuid visible-uuid
+                   :block/tx-id 1
+                   :block/title "Visible child"
+                   :block/page -1
+                   :block/parent -3
+                   :block/order "a0"}
+                  {:db/id -5
+                   :block/uuid property-value-uuid
+                   :block/tx-id 1
+                   :block/title "Property value"
+                   :block/page -1
+                   :block/parent -3
+                   :block/order "a1"
+                   :logseq.property/created-from-property -2}
+                  {:db/id -6
+                   :block/uuid recycled-uuid
+                   :block/tx-id 1
+                   :block/title "Recycled child"
+                   :block/page -1
+                   :block/parent -3
+                   :block/order "a2"
+                   :logseq.property/deleted-at 1}
+                  {:db/id -7
+                   :block/uuid closed-uuid
+                   :block/tx-id 1
+                   :block/title "Closed value"
+                   :block/page -1
+                   :block/parent -3
+                   :block/order "a3"
+                   :block/closed-value-property -2}])
+    (let [result (block-handler/get-block-and-children
+                  @conn root-uuid
+                  {:children? true
+                   :include-property-block? true
+                   :render-data? nil})
+          child-titles (mapv :block/title (:children result))]
+      (is (= "Root" (:block/title (:block result))))
+      (is (= ["Visible child" "Property value"] child-titles)
+          "Structured copies keep property-created children and omit recycled or closed values")
+      (is (not (contains? (:block result) :block/properties))
+          "Structured copies skip renderer display-property maps"))))
+
 (deftest get-block-and-children-positions-default-task-status-test
   (let [conn (db-test/create-conn-with-blocks
               [{:page {:block/title "Page"}
@@ -1089,3 +1164,25 @@
           "An unused positioned property offers existing nodes of its allowed class.")
       (is (= icon (:logseq.property/icon property))
           "Empty left/right values can render their configured icon immediately."))))
+
+(deftest get-block-and-children-respects-include-property-block
+  (let [conn (db-test/create-conn-with-blocks
+              {:properties {:p1 {:logseq.property/type :default}}
+               :pages-and-blocks
+               [{:page {:block/title "page1"}
+                 :blocks [{:block/title "b1"
+                           :build/properties {:p1 "value"}
+                           :build/children [{:block/title "child"}]}]}]})
+        b1 (db-test/find-block-by-content @conn "b1")
+        excluded (:children (block-handler/get-block-and-children
+                             @conn (:block/uuid b1)
+                             {:children? true}))
+        included (:children (block-handler/get-block-and-children
+                             @conn (:block/uuid b1)
+                             {:children? true
+                              :include-property-block? true}))
+        titles (fn [children] (set (keep :block/title children)))]
+    (is (= #{"child"} (titles excluded))
+        "Default children omit property-value blocks")
+    (is (= #{"child" "value"} (titles included))
+        "include-property-block? true returns property-value children used by cut/copy")))

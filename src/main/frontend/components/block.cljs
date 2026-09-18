@@ -293,7 +293,8 @@
                                      "webp" "image/webp"
                                      "bmp" "image/bmp"
                                      "svg" "image/svg+xml"
-                                     "ico" "image/x-icon"}
+                                     "ico" "image/x-icon"
+                                     "jxl" "image/jxl"}
                           mime (get ext->mime ext)]
                       (if-not mime
                         (notification/show! (t :asset/copy-image-unsupported-extension (str "." ext)) :warning)
@@ -2000,7 +2001,7 @@
     (when-let [s (gp-block/get-tag item)]
       (let [s (text/page-ref-un-brackets! s)]
         (if (common-util/uuid-string? s)
-          (page-cp (assoc config :tag? true) {:block/name s})
+          (page-cp (assoc config :tag? true) {:block/uuid (uuid s)})
           [:span (str "#" s)])))
 
     ["Emphasis" [[kind] data]]
@@ -2274,7 +2275,7 @@
         order-list-idx (:own-order-list-index config)
         page-title? (:page-title? config)
         collapsable-page-title? (or page-title? (:collapsable-page-title? config))
-        collapsable? (and (not (entity/url-property-value? block))
+        collapsable? (and (not (entity/leaf-property-value? block))
                           (editor-handler/collapsable? uuid {:semantic? true
                                                             :block block
                                                             :ignore-children? page-title?
@@ -2397,7 +2398,7 @@
 (hsx/defc subscribed-block-control
   [config block opts]
   (let [child-uuids (db-hooks/use-children (:block/uuid block))
-        has-children? (and (not (entity/url-property-value? block))
+        has-children? (and (not (entity/leaf-property-value? block))
                            (boolean (seq child-uuids)))
         block' (assoc block :block.temp/has-children? has-children?)]
     (block-control config block' (assoc opts :has-children? has-children?))))
@@ -2426,6 +2427,18 @@
                    (editor-handler/toggle-list-checkbox block item-content)))}))
 
 (declare src-cp)
+
+(defn- ast-displayed-math-formula
+  [ast]
+  (some (fn [form]
+          (when (and (vector? form)
+                     (= "Displayed_Math" (first form)))
+            (not-empty (string/trim (second form)))))
+        (tree-seq coll? seq ast)))
+
+(defn- page-ref-math-cp
+  [formula]
+  (latex/latex formula false true))
 
 (hsx/defc ^:large-vars/cleanup-todo text-block-title
   [config block]
@@ -2495,8 +2508,16 @@
                          (assoc :node-ref-link-only? true)
                          (integer? heading)
                          (assoc :parent-heading heading))]
-           (if video-title?
+           (cond
+             video-title?
              (video-inline-segments-cp config' block-ast-title)
+
+             (and (:page-ref? config) (empty? block-ast-title))
+             (if-let [formula (ast-displayed-math-formula (:block.temp/ast-body block))]
+               [(page-ref-math-cp formula)]
+               (map-inline config' block-ast-title))
+
+             :else
              (map-inline config' block-ast-title)))))))))
 
 (hsx/defc block-title-aux
@@ -2600,8 +2621,10 @@
 
       ;; TODO: switched to https://cortexjs.io/mathlive/ for editing
       (= :math node-display-type)
-      [:div.math-block
-       (latex/latex (:block/title block) true true)]
+      (if (:page-ref? config)
+        (page-ref-math-cp (:block/title block))
+        [:div.math-block
+         (latex/latex (:block/title block) true true)])
 
       (:logseq.property/query-block? block)
       (query-builder-component/builder block {})
@@ -4640,7 +4663,7 @@
            (query-result config block query-block))))
 
      (when-not (or (:hide-children? config)
-                   (entity/url-property-value? block)
+                   (entity/leaf-property-value? block)
                    table?
                    property?
                    comments-area?

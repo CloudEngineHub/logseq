@@ -68,6 +68,36 @@
     (open-selector! event)
     (is (= event @popup-event*))))
 
+(deftest property-write-id-prefers-ident-test
+  (is (= :logseq.property/default-value
+         (#'property-value/property-write-id
+          {:db/ident :logseq.property/default-value
+           :db/id 42}))
+      "Ident-backed built-in editors should write with ident, not a transient db/id.")
+  (is (= 7
+         (#'property-value/property-write-id {:db/id 7}))
+      "Properties without ident still write with db/id."))
+
+(deftest default-value-property-hides-nested-block-children-test
+  (is (true? (#'property-value/default-value-property-ident?
+              {:db/ident :logseq.property/default-value})))
+  (is (false? (#'property-value/default-value-property-ident?
+               {:db/ident :user.property/p1}))))
+
+(deftest unset-default-value-opens-block-editor-when-entity-exists-test
+  (let [property {:db/ident :logseq.property/default-value}]
+    (is (true? (#'property-value/unset-default-value? property nil)))
+    (is (true? (#'property-value/unset-default-value?
+                property
+                {:db/ident :logseq.property/empty-placeholder})))
+    (is (false? (#'property-value/unset-default-value?
+                 property
+                 {:db/id 10}))
+        "A created default-value entity must use the block editor even without :block/title.")
+    (is (false? (#'property-value/unset-default-value?
+                 {:db/ident :user.property/p1}
+                 nil)))))
+
 (deftest empty-placeholder-identity-maps-as-empty-test
   (is (true? (#'property-value/empty-placeholder-value?
               :logseq.property/empty-placeholder)))
@@ -316,6 +346,65 @@
                   block-handler/get-top-level-blocks identity]
       (is (= [view-selected]
              (property-value/get-operating-blocks target))))))
+
+(deftest get-operating-blocks-wraps-view-selection-uuids-test
+  (let [target {:block/uuid #uuid "11111111-1111-1111-1111-111111111111"}
+        page-a #uuid "22222222-2222-2222-2222-222222222222"
+        page-b #uuid "33333333-3333-3333-3333-333333333333"]
+    (with-redefs [state/get-selection-block-ids (constantly [])
+                  state/get-selection-blocks (constantly [])
+                  state/get-state (fn [key]
+                                    (when (= key :view/selected-blocks)
+                                      [page-a page-b]))
+                  block-handler/get-top-level-blocks identity]
+      (is (= [{:block/uuid page-a} {:block/uuid page-b}]
+             (property-value/get-operating-blocks target))))))
+
+(deftest operating-block-ids-accepts-view-row-identities-test
+  (let [page-a #uuid "22222222-2222-2222-2222-222222222222"
+        page-b #uuid "33333333-3333-3333-3333-333333333333"]
+    (is (= [page-a page-b]
+           (#'property-value/operating-block-ids [page-a page-b]))
+        "All-pages view rows are raw UUIDs.")
+    (is (= [page-a page-b]
+           (#'property-value/operating-block-ids [{:block/uuid page-a}
+                                                  {:uuid page-b}]))
+        "Worker maps may expose :uuid instead of :block/uuid.")))
+
+(deftest batch-set-tags-uses-view-selection-uuids-test
+  (async done
+         (let [page-a #uuid "22222222-2222-2222-2222-222222222222"
+               page-b #uuid "33333333-3333-3333-3333-333333333333"
+               tag-id 1005
+               block {:block/uuid page-a
+                      :block/tags []}
+               property {:db/ident :block/tags
+                         :db/valueType :db.type/ref
+                         :db/cardinality :db.cardinality/many}
+               calls* (atom [])]
+           (-> (p/with-redefs [state/get-current-repo (constantly "test")
+                               state/get-selection-block-ids (constantly [])
+                               state/get-state (fn [key]
+                                                 (when (= key :view/selected-blocks)
+                                                   [page-a page-b]))
+                               db-async/<get-block (fn [_repo _block-ref _opts]
+                                                     (p/resolved block))
+                               db-property-handler/batch-set-property!
+                               (fn [block-ids property-ident value opts]
+                                 (swap! calls* conj [(vec block-ids) property-ident value opts])
+                                 (p/resolved nil))]
+                 (#'property-value/add-or-remove-property-value
+                  block property tag-id false {}))
+               (p/then (fn [_]
+                         (is (= [[[page-a page-b]
+                                  :block/tags
+                                  tag-id
+                                  {:entity-id? true}]]
+                                @calls*))
+                         (done)))
+               (p/catch (fn [error]
+                          (is false (str error))
+                          (done)))))))
 
 (deftest scoped-class-nodes-filters-search-results-by-scoped-classes-test
   (let [property {:logseq.property/type :node}
