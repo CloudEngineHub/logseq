@@ -2260,6 +2260,8 @@
   [block]
   (= (:block/uuid block) (:block/uuid (state/get-edit-block))))
 
+(declare handle-last-input)
+
 (defn edit-box-on-change!
   [e block id]
   (when (current-edit-block? block)
@@ -2276,11 +2278,33 @@
                             (not (re-find #"#\S+" value)))
                    ; don't auto-save for page's properties block
                    (save-current-block! {:skip-properties? true})))
-               450)))))
+               450))
+      ;; Command / page-search triggers for the character just typed. This ran
+      ;; in an effect of the editor box, which re-rendered on every keystroke.
+      (if (state/get-state :editor/on-paste?)
+        (state/set-state! :editor/on-paste? false)
+        (handle-last-input)))))
 
 (defn- start-of-new-word?
   [input pos]
   (contains? #{" " "\t"} (get (.-value input) (- pos 2))))
+
+(defn- org-directive-hashtag?
+  "True when the `#` at or before `pos` starts an org keyword such as `#+BEGIN_NOTE`."
+  [content pos]
+  (boolean
+   (when (and (string? content) (number? pos) (>= pos 2))
+     (let [from-start (subs content 0 pos)
+           hash-idx (string/last-index-of from-start commands/hashtag)]
+       (and (number? hash-idx)
+            (= "+" (util/nth-safe from-start (inc hash-idx))))))))
+
+(defn org-directive-hashtag-query?
+  "True when a hashtag-search query is an org keyword (`+BEGIN_NOTE`, `#+END_QUOTE`)."
+  [q]
+  (boolean
+   (when (string? q)
+     (re-find #"^#?\+[A-Za-z]" (string/trim q)))))
 
 (defn handle-last-input []
   (let [input           (state/get-input)
@@ -2310,12 +2334,15 @@
 
       (or (= last-input-char last-prev-input-char commands/hashtag)
           (and (= last-prev-input-char commands/hashtag)
-               (= last-input-char " ")))
+               (= last-input-char " "))
+          (org-directive-hashtag? content pos))
       (state/clear-editor-action!)
 
       ;; Open "Search page or New page" auto-complete
       (and (not (:comment-editor? config))
            (= last-input-char commands/hashtag)
+           ;; `#+WORD` is org keyword syntax, not a hashtag
+           (not= "+" (util/nth-safe content pos))
              ;; Only trigger at beginning of a line, before whitespace or after a reference
            (or (re-find #"(?m)^#" (str (.-value input)))
                (start-of-new-word? input pos)
@@ -3806,8 +3833,8 @@
                               "backward" [selected-end selected-start]
                               [selected-start selected-end])
             cursor-rect (cursor/get-caret-pos input cursor)]
-        (if (or (and (= direction :up) (cursor/textarea-cursor-rect-first-row? cursor-rect))
-                (and (= direction :down) (cursor/textarea-cursor-rect-last-row? cursor-rect)))
+        (if (or (and (= direction :up) (cursor/textarea-cursor-rect-first-row? cursor-rect input))
+                (and (= direction :down) (cursor/textarea-cursor-rect-last-row? cursor-rect input)))
           ;; if the move is to cross block boundary, select the whole block
           (select-block-up-down direction)
           ;; simulate text selection
