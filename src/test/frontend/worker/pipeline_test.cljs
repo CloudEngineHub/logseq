@@ -1349,36 +1349,81 @@
       (finally
         (ldb/register-transact-pipeline-fn! identity)))))
 
-(deftest move-block-to-library-then-delete-clears-stale-namespace-test
+(deftest move-page-to-library-then-delete-clears-stale-namespace-test
   ;; Reproduces https://github.com/logseq/db-test/issues/1244
+  ;; The Library page only holds normal pages, so a page is moved here.
   (let [conn (db-test/create-conn-with-blocks
               [{:page {:block/title "page1"}
-                :blocks [{:block/title "Block 1"
-                          :build/children [{:block/title "Block 2"}]}]}])
+                :blocks [{:block/title "Block 2"}]}])
         library (ldb/get-library-page @conn)
         _ (assert library "Library page exists")]
     (ldb/register-transact-pipeline-fn! worker-pipeline/transact-pipeline)
     (try
-      (let [block1 (db-test/find-block-by-content @conn "Block 1")]
-        ;; Move Block 1 to the Library page (mod+shift+m "Move to")
-        (outliner-core/move-blocks! conn [block1] library {:sibling? false})
-        (let [block1' (d/entity @conn (:db/id block1))
+      (let [page1 (db-test/find-page-by-title @conn "page1")]
+        ;; Move page1 to the Library page (mod+shift+m "Move to")
+        (outliner-core/move-blocks! conn [page1] library {:sibling? false})
+        (let [page1' (d/entity @conn (:db/id page1))
               block2 (db-test/find-block-by-content @conn "Block 2")]
-          (is (ldb/page? block1') "Moved block becomes a page")
-          (is (= (:db/id library) (:db/id (:block/parent block1')))
-              "New page is a namespace child of Library")
-          (is (= (:db/id block1') (:db/id (:block/page block2)))
-              "Child block's :block/page points to the new page")
+          (is (= (:db/id library) (:db/id (:block/parent page1')))
+              "Page is a namespace child of Library")
+          (is (= (:db/id page1') (:db/id (:block/page block2)))
+              "Child block's :block/page still points to the page")
 
-          ;; Delete Block 1 from the Library page: un-parents the page
-          (outliner-core/delete-blocks! conn [block1'] {})
-          (let [block1'' (d/entity @conn (:db/id block1'))
+          ;; Delete page1 from the Library page: un-parents the page
+          (outliner-core/delete-blocks! conn [page1'] {})
+          (let [page1'' (d/entity @conn (:db/id page1'))
                 block2' (d/entity @conn (:db/id block2))]
-            (is (nil? (:block/parent block1''))
-                "Library/Block 1 namespace is removed")
-            (is (= (:db/id block1'') (:db/id (:block/page block2')))
+            (is (nil? (:block/parent page1''))
+                "Library/page1 namespace is removed")
+            (is (= (:db/id page1'') (:db/id (:block/page block2')))
                 "Child block's :block/page still points to its own page, not Library")
             (is (not= (:db/id library) (:db/id (:block/page block2')))
                 "Stale Library :block/page is cleared"))))
+      (finally
+        (ldb/register-transact-pipeline-fn! identity)))))
+
+(deftest move-page-under-page-registers-namespace-in-library-test
+  ;; Reproduces https://github.com/logseq/db-test/issues/1274
+  ;; Moving a page under another page creates a namespace; its root page
+  ;; should be registered in Library like when the `#Page` tag is used.
+  (let [conn (db-test/create-conn-with-blocks
+              [{:page {:block/title "Parent"}}
+               {:page {:block/title "Child"}}
+               {:page {:block/title "Grandparent"}}
+               {:page {:block/title "Nested"}}
+               {:page {:block/title "Leaf"}}])
+        library (ldb/get-library-page @conn)
+        _ (assert library "Library page exists")]
+    (ldb/register-transact-pipeline-fn! worker-pipeline/transact-pipeline)
+    (try
+      (let [parent (db-test/find-page-by-title @conn "Parent")
+            child (db-test/find-page-by-title @conn "Child")]
+        (is (nil? (:block/parent parent)) "Precondition: Parent has no parent")
+        ;; Move Child under Parent (mod+shift+m "Move to")
+        (outliner-core/move-blocks! conn [child] parent {:sibling? false})
+        (let [parent' (d/entity @conn (:db/id parent))
+              child' (d/entity @conn (:db/id child))]
+          (is (= (:db/id parent') (:db/id (:block/parent child')))
+              "Child is a namespace child of Parent")
+          (is (= (:db/id library) (:db/id (:block/parent parent')))
+              "Parent is registered in Library")
+          (is (ldb/page-in-library? @conn child')
+              "Parent/Child namespace shows up in Library")))
+      (testing "nested move registers the topmost parentless root"
+        (let [grandparent (db-test/find-page-by-title @conn "Grandparent")
+              nested (db-test/find-page-by-title @conn "Nested")
+              leaf (db-test/find-page-by-title @conn "Leaf")]
+          ;; Simulate a namespace created before this fix: Nested is under
+          ;; Grandparent, but Grandparent was never registered in Library.
+          ;; Raw d/transact! bypasses the pipeline like legacy data did.
+          (d/transact! conn [{:db/id (:db/id nested)
+                              :block/parent (:db/id grandparent)}])
+          (outliner-core/move-blocks! conn [leaf] nested {:sibling? false})
+          (let [grandparent' (d/entity @conn (:db/id grandparent))
+                leaf' (d/entity @conn (:db/id leaf))]
+            (is (= (:db/id library) (:db/id (:block/parent grandparent')))
+                "Topmost parentless page ancestor is registered in Library")
+            (is (ldb/page-in-library? @conn leaf')
+                "Grandparent/Nested/Leaf shows up in Library"))))
       (finally
         (ldb/register-transact-pipeline-fn! identity)))))
