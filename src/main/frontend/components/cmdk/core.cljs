@@ -435,12 +435,16 @@
                :dev? config/dev?})]
     (swap! !results assoc-in [group :status] :loading)
     (p/let [current-page-uuid (<page-uuid repo current-page)
-            blocks (search/block-search repo @!input opts)
+            search-result (search/block-search repo @!input opts)
+            {:keys [blocks matched-count]} (block-search-result->items search-result)
             blocks (remove nil? blocks)
             items (map (fn [block]
                          (block-item repo block current-page-uuid @!input))
                        blocks)]
-      (swap! !results update group merge {:status :success :items items}))))
+      (swap! !results update group merge {:status :success
+                                          :items items
+                                          :matched-count matched-count
+                                          :has-more? (> matched-count (count items))}))))
 
 (defmethod load-results :files [group state]
   (let [!input (::input state)
@@ -1427,6 +1431,8 @@
          (reset! (::highlighted-item state) nil)
          (reset! (::focus-source state) :keyboard)
          (reset! (::results state) default-results)
+         ;; Results were just wiped, so any memoized refresh key is stale.
+         (reset! (::last-refresh-key state) nil)
          (when-let [input-ref @(::input-ref state)]
            (set! (.-value input-ref) input))
          (refresh-results! state)))
