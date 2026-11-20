@@ -6,7 +6,6 @@
             [datascript.core :as d]
             [datascript.impl.entity :as de :refer [Entity]]
             [logseq.common.util :as common-util]
-            [logseq.common.util.date-time :as date-time-util]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.common.uuid :as common-uuid]
             [logseq.db :as ldb]
@@ -565,10 +564,7 @@
                         (outliner-validate/validate-page-title (:block/title m*) {:node m*}))
                     page-name (if encrypted-title?
                                 encrypted-name
-                                (if-let [journal-day (:block/journal-day block-entity)]
-                                  (common-util/page-name-sanity-lc
-                                   (date-time-util/int->journal-title journal-day date-time-util/default-journal-title-formatter))
-                                  (common-util/page-name-sanity-lc (:block/title m*))))]
+                                (common-util/page-name-sanity-lc (:block/title m*)))]
                 (assoc m* :block/name page-name))
               m*)
           _ (when (and ;; page or object changed?
@@ -1757,32 +1753,28 @@
                     (concat-tx-fn result collapsed-tx))
                   (move-blocks conn blocks' left (merge opts {:sibling? false
                                                               :indent? true}))))))
-          (if parent-original
-            (let [blocks' (take-while (fn [b]
-                                        (not= (:db/id (:block/parent b))
-                                              (:db/id (:block/parent parent))))
-                                      top-level-blocks)]
+          (let [blocks' (take-while (fn [b]
+                                      (= (:db/id (:block/parent b))
+                                         (:db/id parent)))
+                                    top-level-blocks)]
+            (if parent-original
               (move-blocks conn blocks' parent-original (merge opts {:outliner-op :indent-outdent-blocks
                                                                      :sibling? true
-                                                                     :indent? false})))
+                                                                     :indent? false}))
 
-            (when parent
-              (let [blocks' (take-while (fn [b]
-                                          (not= (:db/id (:block/parent b))
-                                                (:db/id (:block/parent parent))))
-                                        top-level-blocks)
-                    result (move-blocks conn blocks' parent (merge opts {:sibling? true}))]
-                (if logical-outdenting?
-                  result
-                  ;; direct outdenting (default behavior)
-                  (let [last-top-block (d/entity db (:db/id (last blocks')))
-                        right-siblings (remove protected-comment-block?
-                                               (get-right-siblings last-top-block))]
-                    (if (seq right-siblings)
-                      (if-let [last-direct-child-id (ldb/get-block-last-direct-child-id db (:db/id last-top-block))]
-                        (move-blocks conn right-siblings (d/entity db last-direct-child-id) (merge opts {:sibling? true}))
-                        (move-blocks conn right-siblings last-top-block (merge opts {:sibling? false})))
-                      result)))))))))))
+              (when parent
+                (let [result (move-blocks conn blocks' parent (merge opts {:sibling? true}))]
+                  (if logical-outdenting?
+                    result
+                    ;; direct outdenting (default behavior)
+                    (let [last-top-block (d/entity db (:db/id (last blocks')))
+                          right-siblings (remove protected-comment-block?
+                                                 (get-right-siblings last-top-block))]
+                      (if (seq right-siblings)
+                        (if-let [last-direct-child-id (ldb/get-block-last-direct-child-id db (:db/id last-top-block))]
+                          (move-blocks conn right-siblings (d/entity db last-direct-child-id) (merge opts {:sibling? true}))
+                          (move-blocks conn right-siblings last-top-block (merge opts {:sibling? false})))
+                        result))))))))))))
 
 ;;; ### write-operations have side-effects (do transactions) ;;;;;;;;;;;;;;;;
 
