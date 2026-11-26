@@ -169,3 +169,29 @@ pnpm test:node-adapter
 
 ## Notes
 - Runtime and db-sync engineering guidance is consolidated in `../../docs/agent-guide/implemented/architecture/2026-08-24-logseq-runtime-and-engineering-guide.md`; current protocol and route definitions live under `src/logseq/db_sync/worker/`.
+
+### Mobile discussion push
+
+Mobile devices register with `PUT /mobile/push-device` and unregister with
+`DELETE /mobile/push-device`. The iOS URLSession and Android OkHttp clients call
+the endpoint directly with Cognito authentication. Apply D1 migrations 0008
+and 0009 before enabling the preference-aware Worker. For an existing deployment,
+set `DISCUSSION_PUSH_ENABLED=false` before applying 0009. Deploy the new Worker
+before re-enabling push. Migration 0009 adds device columns and requires the
+new Worker's registration query. The Worker generates generic alerts after an
+authenticated graph member writes a comment or reaction. Comment alerts
+include authors of earlier, already committed comments in the same thread,
+using the committed block order after sync. The push payload includes a graph
+UUID and event UUID for navigation.
+
+Set the following provider credentials in the worker environment.
+
+- APNs needs `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` (PKCS#8 PEM),
+  and `APNS_TOPIC` (the mobile bundle ID).
+- FCM needs `FCM_PROJECT_ID`, `FCM_CLIENT_EMAIL`, and `FCM_PRIVATE_KEY`
+  (PKCS#8 PEM). The service account needs permission to send FCM messages.
+
+Set `DISCUSSION_PUSH_ENABLED=true` for a configured environment. Its cron
+processes due deliveries each minute. Verify with signed builds and sandbox or
+staging credentials before enabling production. Run the local delivery tests
+with `pnpm test:discussion-push`.
